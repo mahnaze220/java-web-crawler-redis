@@ -1,12 +1,11 @@
 package com.sample.crawler.service;
 
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -19,6 +18,9 @@ import org.jsoup.Jsoup;
 import org.jsoup.internal.StringUtil;
 import org.jsoup.nodes.Document;
 import org.jsoup.select.Elements;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.cache.annotation.CacheConfig;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 
 import com.sample.crawler.model.CrawlerResponse;
@@ -35,6 +37,8 @@ import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
 @Service
+@CacheConfig(cacheNames = "crawler")
+
 public class WebCrawlerService {
 
 	//the pattern for web page urls 
@@ -56,9 +60,10 @@ public class WebCrawlerService {
 	private static final String CHROME = "Chrome";	
 	private static final int TIMEOUT = 500000;
 	private static final int TOP_NUMBER = 5;
+	private static final String CRAWLER_KEY = "jsCrawler";
 
-	// this map holds all javaScript libraries used in visited web pages
-	private ConcurrentHashMap<String, Integer> javaScriptLibraries = new ConcurrentHashMap<>();
+	@Autowired
+	private RedisTemplate<Object, Object> redisTemplate;
 
 	private ExecutorService executorService;
 	private final Object lock = new Object();
@@ -69,7 +74,7 @@ public class WebCrawlerService {
 	 * @param searchQuery
 	 * @param numberOfThreads
 	 * @return CrawlerResponse
-	 */
+	 */    
 	public CrawlerResponse getTopJSLibraries(String searchQuery, int numberOfThreads) {
 
 		log.info("Getting top java script libraries in the pages fetched by google based on "
@@ -88,7 +93,7 @@ public class WebCrawlerService {
 		shutdown();
 
 		//extract top 5 javaScript libraries from the map
-		return new CrawlerResponse(getTopLibraries(javaScriptLibraries));
+		return new CrawlerResponse(getTopLibraries());
 	}
 
 	public Elements getPagesFromGoogle(String query) {
@@ -202,18 +207,29 @@ public class WebCrawlerService {
 				src = src.substring(src.lastIndexOf(SLASH) + 1, src.lastIndexOf(JS) + 3);
 
 				//put javaScript library name into map or if exists, increment the count
-				if (!javaScriptLibraries.containsKey(src)) {
-					javaScriptLibraries.put(src, 1);
-				} else {
-					javaScriptLibraries.put(src, javaScriptLibraries.get(src) + 1);
-				}
+				updateCache(src);
 			});
 		} catch (Exception e) {
 			log.error("Exception in connecting to the url: {}, {}", url, e.getMessage());
 		}
 	}
 
-	public Set<String> getTopLibraries(ConcurrentMap<String, Integer> libraries) {
+	private void updateCache(String jsLib) {
+		Integer cachedJs = (Integer) redisTemplate.opsForHash().get(CRAWLER_KEY, jsLib);
+		if(cachedJs == null) {
+			redisTemplate.opsForHash().put(CRAWLER_KEY, jsLib, 1);
+		}
+		else {
+			redisTemplate.opsForHash().put(CRAWLER_KEY, jsLib, cachedJs + 1);
+		}
+	}
+
+	public Set<String> getTopLibraries() {
+		Map<Object, Object> keys = redisTemplate.opsForHash().entries(CRAWLER_KEY);
+
+		Map<String,Integer> libraries = new HashMap<String, Integer>();
+		keys.entrySet().stream()
+		.forEach(entry -> libraries.put((String)entry.getKey(), (Integer)entry.getValue()));
 
 		//get top 5 library based on their usages in web pages
 		Map<String, Integer> result = libraries.entrySet().stream()
